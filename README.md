@@ -116,6 +116,12 @@ onomatool 'docs/**/*.md'
 onomatool '*.unknown' --format pdf
 ```
 
+### Interactive Quick Start (no args)
+```bash
+# Run the interactive selector (model/provider + optional Ollama model + path)
+onoma
+```
+
 ### Preview Mode
 ```bash
 # See what would be renamed (no changes made)
@@ -148,16 +154,57 @@ OnomaTool uses a TOML configuration file at `~/.onomarc` or a custom path with `
 onomatool --save-config
 ```
 
+### Ollama: list or pick installed models
+```bash
+# List installed Ollama models
+onomatool --ollama-list
+
+# Prompt to select an installed Ollama model for this run
+onomatool --ollama-select '*.pdf'
+
+# Use a specific Ollama model for this run
+onomatool --ollama-model llama3.2:latest '*.pdf'
+```
+
+### Interactive selector (remembers last choices)
+When you run `onoma` with no arguments, it:
+1) Prompts for a provider/model mode (with optional fallback chains)
+2) If Ollama is selected, prompts for an installed Ollama model
+3) Prompts for a file path or glob pattern
+
+It remembers your last selections and asks whether to reuse them next time.
+
+### Forget remembered selections
+```bash
+# Clear all remembered selections (provider/model/pattern)
+onoma --forget-last
+
+# Clear only the last provider selection
+onoma --forget-last-provider
+
+# Clear only the last path/pattern
+onoma --forget-last-pattern
+
+# Clear only the last Ollama model
+onoma --forget-last-ollama-model
+```
+
 ### Configuration Options
 ```toml
 # API Configuration
-default_provider = "openai"  # or "google"
+default_provider = "openai"  # openai, anthropic, ollama, or google
 openai_api_key = "sk-..."
 openai_base_url = "https://api.openai.com/v1"  # or local endpoint
+openai_model = "gpt-4o"
+anthropic_api_key = "sk-ant-..."
+anthropic_base_url = "https://api.anthropic.com"
+anthropic_model = "claude-3-5-sonnet-20241022"
+ollama_base_url = "http://localhost:11434"
+ollama_model = "llama3.2:latest"
 google_api_key = "your-google-api-key"
 
 # Model and Behavior
-llm_model = "gpt-4o"  # or "gemini-pro"
+llm_model = "gpt-4o"  # fallback model if provider-specific model is not set
 naming_convention = "snake_case"  # snake_case, CamelCase, kebab-case, etc.
 
 # Custom Prompts (optional - defaults provided)

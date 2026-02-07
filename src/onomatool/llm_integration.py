@@ -22,6 +22,23 @@ MAX_CONTENT_CHARS = 120_000
 MAX_CONSECUTIVE_DIGITS = 10
 
 
+def list_ollama_models(config: dict) -> list[str]:
+    """Return installed Ollama model names from the local Ollama server."""
+    try:
+        import httpx
+
+        base_url = config.get("ollama_base_url", "http://localhost:11434").rstrip("/")
+        url = f"{base_url}/api/tags"
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+        models = [m.get("name") for m in data.get("models", []) if m.get("name")]
+        return sorted(dict.fromkeys(models))
+    except Exception as err:
+        raise RuntimeError(f"Failed to list Ollama models: {err}") from err
+
+
 def get_pydantic_model_and_schema(naming_convention: str) -> tuple:
     """
     Get the Pydantic model and JSON schema for a given naming convention.
@@ -124,6 +141,21 @@ def get_suggestions(
     else:
         user_prompt = get_user_prompt(naming_convention, truncated_content, config)
 
+    def provider_chain(primary: str) -> list[str]:
+        if config.get("disable_fallback"):
+            return [primary]
+        if primary == "ollama":
+            return ["ollama", "anthropic", "openai"]
+        if primary == "anthropic":
+            return ["anthropic", "openai"]
+        if primary == "openai":
+            return ["openai"]
+        if primary == "google":
+            return ["google"]
+        if primary == "mock":
+            return ["mock"]
+        return [primary]
+
     # MOCK PROVIDER: Always return static suggestions for tests
     if provider == "mock":
 
@@ -141,7 +173,22 @@ def get_suggestions(
             return ["Mock File One", "Mock File Two", "Mock File Three"]
         return ["mock_file_one", "mock_file_two", "mock_file_three"]
 
-    if provider == "openai":
+    def extract_suggestions_from_text(text: str) -> list[str]:
+        try:
+            data = json.loads(text)
+            suggestions = data.get("suggestions", [])
+            if isinstance(suggestions, list) and len(suggestions) == 3:
+                return suggestions
+        except Exception:
+            pass
+        import re
+
+        suggestions = re.findall(r'"([^"]{1,128})"', text)
+        if len(suggestions) >= 3:
+            return suggestions[:3]
+        raise RuntimeError("LLM did not return exactly 3 suggestions.")
+
+    def call_openai() -> list[str]:
         try:
             import httpx
             from openai import OpenAI
@@ -349,7 +396,96 @@ def get_suggestions(
                 return suggestions
         except Exception as err:
             raise RuntimeError(f"OpenAI LLM call failed: {err}") from err
-    elif provider == "google":
+
+    def call_anthropic() -> list[str]:
+        try:
+            from anthropic import Anthropic
+
+            api_key = config.get("anthropic_api_key") or os.environ.get(
+                "ANTHROPIC_API_KEY"
+            )
+            base_url = config.get("anthropic_base_url") or os.environ.get(
+                "ANTHROPIC_BASE_URL"
+            )
+            anthropic_model = config.get("anthropic_model") or model
+            client = Anthropic(api_key=api_key, base_url=base_url)
+
+            if is_image and image_message:
+                mime = image_message["image_url"].split(";")[0].replace("data:", "")
+                image_data = image_message["image_url"].split(",", 1)[1]
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_prompt},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": mime,
+                                    "data": image_data,
+                                },
+                            },
+                        ],
+                    }
+                ]
+            else:
+                messages = [
+                    {"role": "user", "content": user_prompt},
+                ]
+
+            response = client.messages.create(
+                model=anthropic_model,
+                max_tokens=MAX_TOKENS,
+                system=system_prompt,
+                messages=messages,
+            )
+            text = "".join(
+                block.text for block in response.content if getattr(block, "text", None)
+            )
+            return extract_suggestions_from_text(text)
+        except Exception as err:
+            raise RuntimeError(f"Anthropic LLM call failed: {err}") from err
+
+    def call_ollama() -> list[str]:
+        try:
+            import httpx
+
+            base_url = config.get("ollama_base_url", "http://localhost:11434").rstrip(
+                "/"
+            )
+            ollama_model = config.get("ollama_model") or model
+            url = f"{base_url}/api/chat"
+            if is_image and image_message:
+                image_data = image_message["image_url"].split(",", 1)[1]
+                user_message = {
+                    "role": "user",
+                    "content": user_prompt,
+                    "images": [image_data],
+                }
+            else:
+                user_message = {"role": "user", "content": user_prompt}
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                user_message,
+            ]
+            payload = {
+                "model": ollama_model,
+                "messages": messages,
+                "stream": False,
+                "format": "json",
+            }
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+            content = data.get("message", {}).get("content", "")
+            return extract_suggestions_from_text(content)
+        except Exception as err:
+            raise RuntimeError(f"Ollama LLM call failed: {err}") from err
+
+    def call_google() -> list[str]:
         try:
             import google.generativeai as genai
 
@@ -391,8 +527,36 @@ def get_suggestions(
             return suggestions[:3]
         except Exception as err:
             raise RuntimeError(f"Google LLM call failed: {err}") from err
-    else:
-        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    last_error: Exception | None = None
+    for attempt_provider in provider_chain(provider):
+        try:
+            if attempt_provider == "openai":
+                model = config.get("openai_model") or model
+                return call_openai()
+            if attempt_provider == "anthropic":
+                model = config.get("anthropic_model") or model
+                return call_anthropic()
+            if attempt_provider == "ollama":
+                model = config.get("ollama_model") or model
+                return call_ollama()
+            if attempt_provider == "google":
+                return call_google()
+            if attempt_provider == "mock":
+                return get_suggestions(
+                    content,
+                    verbose_level=verbose_level,
+                    file_path=file_path,
+                    config={"default_provider": "mock", **config},
+                )
+            raise RuntimeError(f"Unsupported provider: {attempt_provider}")
+        except Exception as err:
+            last_error = err
+            if verbose_level > 0:
+                print(f"[DEBUG] Provider {attempt_provider} failed: {err}")
+            continue
+
+    raise RuntimeError(f"All providers failed. Last error: {last_error}")
 
 
 def count_tokens_for_messages(messages: list, model: str = "gpt-4o") -> int:

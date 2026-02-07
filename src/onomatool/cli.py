@@ -10,7 +10,7 @@ from onomatool.config import DEFAULT_CONFIG, get_config
 from onomatool.conflict_resolver import resolve_conflict
 from onomatool.file_collector import collect_files
 from onomatool.file_dispatcher import FileDispatcher
-from onomatool.llm_integration import get_suggestions
+from onomatool.llm_integration import get_suggestions, list_ollama_models
 from onomatool.renamer import rename_file
 from onomatool.utils.image_utils import convert_svg_to_png
 
@@ -87,6 +87,40 @@ def main(args=None):
             "--config",
             help="Specify a configuration file to use",
         )
+        parser.add_argument(
+            "--ollama-list",
+            action="store_true",
+            help="List installed Ollama models and exit",
+        )
+        parser.add_argument(
+            "--ollama-select",
+            action="store_true",
+            help="Prompt to select an installed Ollama model for this run",
+        )
+        parser.add_argument(
+            "--ollama-model",
+            help="Use a specific Ollama model for this run (implies provider=ollama)",
+        )
+        parser.add_argument(
+            "--forget-last",
+            action="store_true",
+            help="Clear remembered last selections (provider/model/pattern)",
+        )
+        parser.add_argument(
+            "--forget-last-provider",
+            action="store_true",
+            help="Clear remembered last provider selection",
+        )
+        parser.add_argument(
+            "--forget-last-pattern",
+            action="store_true",
+            help="Clear remembered last path/pattern",
+        )
+        parser.add_argument(
+            "--forget-last-ollama-model",
+            action="store_true",
+            help="Clear remembered last Ollama model",
+        )
         args = parser.parse_args(args)
 
         if args.save_config:
@@ -94,8 +128,120 @@ def main(args=None):
             print("Default configuration saved to ~/.onomarc")
             return 0
 
-        if not args.pattern:
-            parser.error("the following arguments are required: pattern")
+        if args.ollama_list:
+            config = get_config(args.config)
+            models = list_ollama_models(config)
+            if not models:
+                print("No Ollama models found.")
+                return 0
+            print("Installed Ollama models:")
+            for name in models:
+                print(f"- {name}")
+            return 0
+
+        if args.forget_last or args.forget_last_provider or args.forget_last_pattern or args.forget_last_ollama_model:
+            config = get_config(args.config)
+            if args.forget_last or args.forget_last_provider:
+                config.pop("last_provider_choice", None)
+            if args.forget_last or args.forget_last_pattern:
+                config.pop("last_pattern", None)
+            if args.forget_last or args.forget_last_ollama_model:
+                config.pop("ollama_model", None)
+            _save_config(config, args.config)
+            print("Cleared remembered selections.")
+            return 0
+
+        def prompt_choice(prompt: str, options: list[str]) -> int:
+            print(prompt)
+            for idx, label in enumerate(options, start=1):
+                print(f"{idx}. {label}")
+            choice = input("Enter number: ").strip()
+            if not choice.isdigit() or not (1 <= int(choice) <= len(options)):
+                return -1
+            return int(choice) - 1
+
+        def interactive_run() -> tuple[dict, str] | None:
+            config = get_config(args.config)
+            provider_options = [
+                "Anthropic → OpenAI (fallback)",
+                "Ollama → Anthropic → OpenAI (fallback)",
+                "Anthropic only",
+                "OpenAI only",
+                "Ollama only",
+            ]
+            last_choice = config.get("last_provider_choice")
+            idx = -1
+            if isinstance(last_choice, int) and 0 <= last_choice < len(provider_options):
+                keep = input(
+                    f"Use last selection ({provider_options[last_choice]})? [Y/n]: "
+                ).strip().lower()
+                if keep in {"", "y", "yes"}:
+                    idx = last_choice
+            if idx < 0:
+                idx = prompt_choice(
+                    "Select model/provider mode for this run:", provider_options
+                )
+                if idx < 0:
+                    print("Invalid selection.")
+                    return None
+
+            if idx == 0:
+                config["default_provider"] = "anthropic"
+            elif idx == 1:
+                config["default_provider"] = "ollama"
+            elif idx == 2:
+                config["default_provider"] = "anthropic"
+                config["disable_fallback"] = True
+            elif idx == 3:
+                config["default_provider"] = "openai"
+                config["disable_fallback"] = True
+            elif idx == 4:
+                config["default_provider"] = "ollama"
+                config["disable_fallback"] = True
+
+            if config.get("default_provider") == "ollama":
+                models = list_ollama_models(config)
+                if not models:
+                    print("No Ollama models found.")
+                    return None
+                last_ollama_model = config.get("ollama_model")
+                if isinstance(last_ollama_model, str) and last_ollama_model in models:
+                    keep_model = input(
+                        f"Use last Ollama model ({last_ollama_model})? [Y/n]: "
+                    ).strip().lower()
+                    if keep_model in {"", "y", "yes"}:
+                        config["ollama_model"] = last_ollama_model
+                    else:
+                        m_idx = prompt_choice("Select an Ollama model:", models)
+                        if m_idx < 0:
+                            print("Invalid selection.")
+                            return None
+                        config["ollama_model"] = models[m_idx]
+                else:
+                    m_idx = prompt_choice("Select an Ollama model:", models)
+                    if m_idx < 0:
+                        print("Invalid selection.")
+                        return None
+                    config["ollama_model"] = models[m_idx]
+
+            last_pattern = config.get("last_pattern")
+            if isinstance(last_pattern, str) and last_pattern:
+                keep_pattern = input(
+                    f"Use last path/pattern ({last_pattern})? [Y/n]: "
+                ).strip().lower()
+                if keep_pattern in {"", "y", "yes"}:
+                    pattern = last_pattern
+                else:
+                    pattern = input("Enter file path or glob pattern: ").strip()
+            else:
+                pattern = input("Enter file path or glob pattern: ").strip()
+            if not pattern:
+                print("No path provided.")
+                return None
+            config["last_provider_choice"] = idx
+            config["last_pattern"] = pattern
+            _save_config(config, args.config)
+            return config, pattern
 
         if args.interactive and not args.dry_run:
             parser.error("--interactive must be used with --dry-run")
@@ -108,8 +254,34 @@ def main(args=None):
         else:
             verbose_level = 0  # No verbose output
 
-        config = get_config(args.config)
-        files = collect_files(args.pattern)
+        if not args.pattern:
+            interactive = interactive_run()
+            if not interactive:
+                return 1
+            config, pattern = interactive
+        else:
+            config = get_config(args.config)
+            pattern = args.pattern
+
+        if args.ollama_model:
+            config["ollama_model"] = args.ollama_model
+            config["default_provider"] = "ollama"
+
+        if args.ollama_select:
+            models = list_ollama_models(config)
+            if not models:
+                print("No Ollama models found.")
+                return 1
+            print("Select an Ollama model:")
+            for idx, name in enumerate(models, start=1):
+                print(f"{idx}. {name}")
+            choice = input("Enter number: ").strip()
+            if not choice.isdigit() or not (1 <= int(choice) <= len(models)):
+                print("Invalid selection.")
+                return 1
+            config["ollama_model"] = models[int(choice) - 1]
+            config["default_provider"] = "ollama"
+        files = collect_files(pattern)
         dispatcher = FileDispatcher(config, debug=args.debug)
 
         planned_renames = []
@@ -425,6 +597,17 @@ def save_default_config():
             toml.dump(config, f)
     except Exception as e:
         print(f"Error saving default config: {e}")
+        sys.exit(1)
+
+
+def _save_config(config: dict, config_path: str | None) -> None:
+    """Persist config to the default path or a custom one."""
+    path = os.path.expanduser(config_path) if config_path else os.path.expanduser("~/.onomarc")
+    try:
+        with open(path, "w") as f:
+            toml.dump(config, f)
+    except Exception as e:
+        print(f"Error saving config: {e}")
         sys.exit(1)
 
 
