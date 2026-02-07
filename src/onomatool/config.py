@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     "cover_use_openlibrary": True,
     "cover_use_google_books": True,
     "google_books_api_key": "",
+    "cleanup_junk_files": True,
 }
 
 

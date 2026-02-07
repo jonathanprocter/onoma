@@ -78,6 +78,27 @@ def _build_report_path(config: dict, report_format: str, report_path: str | None
     return os.path.join(report_dir, f"onoma-report-{timestamp}.{report_format}")
 
 
+def _cleanup_junk_files(pattern: str) -> None:
+    # Delete .DS_Store and ._* files under the base path for the pattern
+    base = os.path.expanduser(pattern)
+    magic_chars = ["*", "?", "[", "{"]
+    first_magic = min([base.find(ch) for ch in magic_chars if base.find(ch) != -1], default=-1)
+    if first_magic != -1:
+        base = base[:first_magic]
+    base = base.rstrip(os.sep)
+    if not base:
+        base = "."
+    if not os.path.isdir(base):
+        base = os.path.dirname(base) or "."
+    for root, _, files in os.walk(base):
+        for name in files:
+            if name == ".DS_Store" or name.startswith("._"):
+                try:
+                    os.remove(os.path.join(root, name))
+                except Exception:
+                    pass
+
+
 def _write_report(entries: list[dict], path: str, report_format: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     if report_format == "csv":
@@ -755,6 +776,9 @@ def main(args=None):
         else:
             config = get_config(args.config)
             pattern = args.pattern
+
+        if config.get("cleanup_junk_files", True):
+            _cleanup_junk_files(pattern)
 
         if args.ollama_model:
             config["ollama_model"] = args.ollama_model

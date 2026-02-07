@@ -209,6 +209,7 @@ def get_suggestions(
         try:
             import httpx
             from openai import OpenAI
+            local_model = model
 
             # Check if we should use Azure OpenAI
             use_azure = config.get("use_azure_openai", False)
@@ -240,7 +241,7 @@ def get_suggestions(
                     )
 
                 # For Azure, we override the model with the deployment name
-                model = azure_deployment
+                local_model = azure_deployment
 
                 from openai import AzureOpenAI
 
@@ -346,7 +347,7 @@ def get_suggestions(
                     if is_image:
                         # For images, only count text content, not base64 image data
                         total_chars = len(user_prompt)
-                    total_tokens = count_tokens_for_messages(messages, model)
+                    total_tokens = count_tokens_for_messages(messages, local_model)
 
                     print(f"[DEBUG] Total characters in request: {total_chars}")
                     print(f"[DEBUG] Estimated tokens: {total_tokens}")
@@ -367,7 +368,7 @@ def get_suggestions(
             # Try to use structured output with Pydantic first
             try:
                 response = client.beta.chat.completions.parse(
-                    model=model,
+                    model=local_model,
                     messages=messages,
                     response_format=pydantic_model,
                     max_tokens=MAX_TOKENS,
@@ -389,7 +390,7 @@ def get_suggestions(
 
                 # Fallback to traditional JSON schema approach
                 response = client.chat.completions.create(
-                    model=model,
+                    model=local_model,
                     messages=messages,
                     response_format=json_schema,
                     max_tokens=MAX_TOKENS,

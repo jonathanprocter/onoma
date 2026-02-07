@@ -284,6 +284,7 @@ cover_output_dir = ""       # empty = same folder as ebook
 cover_use_openlibrary = true
 cover_use_google_books = true
 google_books_api_key = ""   # optional
+cleanup_junk_files = true   # delete .DS_Store and ._ files before processing
 
 # Batch rules (per-path overrides)
 [[batch_rules]]
