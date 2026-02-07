@@ -19,6 +19,7 @@ from onomatool.conflict_resolver import resolve_conflict
 from onomatool.file_collector import collect_files
 from onomatool.file_dispatcher import FileDispatcher
 from onomatool.llm_integration import get_suggestions, list_ollama_models
+from onomatool.utils.cover_utils import cover_workflow, extract_isbn
 from onomatool.utils.titlecase_utils import apply_titlecase, evaluate_title
 from onomatool.utils.image_utils import convert_svg_to_png
 
@@ -281,6 +282,7 @@ def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
                     "suggestion": entry["suggestion"],
                     "provider": provider,
                     "model": model_name,
+                    "isbn": entry.get("isbn"),
                 }
             )
             continue
@@ -302,6 +304,7 @@ def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
                     "suggestion": entry["suggestion"],
                     "provider": provider,
                     "model": model_name,
+                    "isbn": entry.get("isbn"),
                 }
             )
         else:
@@ -313,6 +316,7 @@ def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
                     "suggestion": entry["suggestion"],
                     "provider": provider,
                     "model": model_name,
+                    "isbn": entry.get("isbn"),
                 }
             )
 
@@ -574,6 +578,11 @@ def main(args=None):
             action="store_true",
             help="Rename folders (bottom-up) using title casing",
         )
+        parser.add_argument(
+            "--cover",
+            action="store_true",
+            help="Enable cover extraction and saving",
+        )
         args = parser.parse_args(args)
 
         if args.save_config:
@@ -765,6 +774,8 @@ def main(args=None):
                 return 1
             config["ollama_model"] = models[int(choice) - 1]
             config["default_provider"] = "ollama"
+        if args.cover:
+            config["cover_enabled"] = True
         files = collect_files(pattern)
         planned_renames: list[dict] = []
         report_entries: list[dict] = []
@@ -881,12 +892,16 @@ def main(args=None):
                     )
                     if suggestions:
                         new_name = suggestions[0]
+                        isbn = extract_isbn(
+                            result if isinstance(result, str) else result.get("markdown", "")
+                        )
                         planned_renames.append(
                             {
                                 "original_path": file_path,
                                 "suggestion": new_name,
                                 "provider": provider,
                                 "model": model_name,
+                                "isbn": isbn,
                             }
                         )
                     else:
@@ -963,12 +978,14 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]
+                            isbn = extract_isbn(result.get("markdown", ""))
                             planned_renames.append(
                                 {
                                     "original_path": file_path,
                                     "suggestion": new_name,
                                     "provider": provider,
                                     "model": model_name,
+                                    "isbn": isbn,
                                 }
                             )
                         else:
@@ -1007,12 +1024,14 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]
+                            isbn = extract_isbn(result.get("markdown", ""))
                             planned_renames.append(
                                 {
                                     "original_path": file_path,
                                     "suggestion": new_name,
                                     "provider": provider,
                                     "model": model_name,
+                                    "isbn": isbn,
                                 }
                             )
                     else:
@@ -1025,12 +1044,14 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]  # Use first suggestion in Phase 1
+                            isbn = extract_isbn(content)
                             planned_renames.append(
                                 {
                                     "original_path": file_path,
                                     "suggestion": new_name,
                                     "provider": provider,
                                     "model": model_name,
+                                    "isbn": isbn,
                                 }
                             )
                         else:
@@ -1082,6 +1103,15 @@ def main(args=None):
                         provider=entry.get("provider", ""),
                         model_name=entry.get("model", ""),
                     )
+                    if config.get("cover_enabled", False):
+                        add_report_entry(
+                            "cover_pending",
+                            src,
+                            dst,
+                            entry.get("suggestion", ""),
+                            provider=entry.get("provider", ""),
+                            model_name=entry.get("model", ""),
+                        )
                 elif action == "duplicate":
                     print(f"{os.path.basename(src)} --dry-run-> DUPLICATE {os.path.basename(dst)}")
                     add_report_entry(
@@ -1129,6 +1159,10 @@ def main(args=None):
                                 provider=entry.get("provider", ""),
                                 model_name=entry.get("model", ""),
                             )
+                            if config.get("cover_enabled", False):
+                                cover = cover_workflow(dst, dst, entry.get("isbn"), config)
+                                if cover:
+                                    add_report_entry(cover.get("status", "cover"), src, dst)
                         elif action == "duplicate":
                             os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
                             shutil.move(src, dst)
@@ -1176,6 +1210,10 @@ def main(args=None):
                         provider=entry.get("provider", ""),
                         model_name=entry.get("model", ""),
                     )
+                    if config.get("cover_enabled", False):
+                        cover = cover_workflow(dst, dst, entry.get("isbn"), config)
+                        if cover:
+                            add_report_entry(cover.get("status", "cover"), src, dst)
                 elif action == "duplicate":
                     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
                     shutil.move(src, dst)

@@ -43,6 +43,14 @@ DEFAULT_CONFIG = {
     "duplicates_dir": "duplicates",
     "fuzzy_duplicate_threshold": 0.9,
     "rename_folders": False,
+    "cover_enabled": False,
+    "cover_embed": False,
+    "cover_overwrite": False,
+    "cover_min_size": 300,
+    "cover_output_dir": "",
+    "cover_use_openlibrary": True,
+    "cover_use_google_books": True,
+    "google_books_api_key": "",
 }
 
 

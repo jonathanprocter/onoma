@@ -192,6 +192,9 @@ onoma '*.pdf' --no-report
 # Undo script is written alongside the report
 ls ./reports/run-001.jsonl.undo.sh
 
+# Enable cover extraction
+onoma --cover '*.epub'
+
 # Undo last run (uses last report automatically)
 onoma --undo
 
@@ -273,6 +276,14 @@ last_report_path = ""       # auto-managed
 duplicates_dir = "duplicates" # folder for detected duplicates
 fuzzy_duplicate_threshold = 0.9 # similarity threshold for fuzzy warnings
 rename_folders = false      # rename folders bottom-up
+cover_enabled = false       # extract covers and save alongside files
+cover_embed = false         # embed cover back into EPUBs
+cover_overwrite = false     # overwrite existing cover image files
+cover_min_size = 300        # minimum dimension in pixels
+cover_output_dir = ""       # empty = same folder as ebook
+cover_use_openlibrary = true
+cover_use_google_books = true
+google_books_api_key = ""   # optional
 
 # Batch rules (per-path overrides)
 [[batch_rules]]
