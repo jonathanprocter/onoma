@@ -174,6 +174,25 @@ When you run `onoma` with no arguments, it:
 
 It remembers your last selections and asks whether to reuse them next time.
 
+### Reports and undo
+Every run writes a report (JSONL by default) with old/new paths and status.
+```bash
+# Write report to a specific path
+onoma '*.pdf' --report ./reports/run-001.jsonl
+
+# Use CSV format
+onoma '*.pdf' --report-format csv
+
+# Disable report output
+onoma '*.pdf' --no-report
+
+# Undo last run (uses last report automatically)
+onoma --undo
+
+# Undo using a specific report file
+onoma --undo --undo-report ./reports/run-001.jsonl
+```
+
 ### Forget remembered selections
 ```bash
 # Clear all remembered selections (provider/model/pattern)
@@ -220,6 +239,21 @@ docintel_endpoint = ""
 # Word count limits (NEW!)
 min_filename_words = 5      # Minimum words required (ensures descriptive names)
 max_filename_words = 15     # Maximum words allowed (prevents overly long names)
+
+# Reports
+report_enabled = true
+report_format = "jsonl"     # jsonl or csv
+report_dir = ""             # empty = current working directory
+last_report_path = ""       # auto-managed
+
+# Batch rules (per-path overrides)
+[[batch_rules]]
+pattern = "Books/**/*.pdf"
+overrides = { naming_convention = "natural language", min_filename_words = 3 }
+
+[[batch_rules]]
+pattern = "Receipts/**"
+overrides = { naming_convention = "snake_case", max_filename_words = 8 }
 ```
 
 ### Supported Naming Conventions

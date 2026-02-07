@@ -1,7 +1,13 @@
 import argparse
+import csv
+import fnmatch
+import glob
+import json
 import os
+import shutil
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import toml
@@ -16,6 +22,186 @@ from onomatool.utils.image_utils import convert_svg_to_png
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+def _merge_overrides(base: dict, overrides: dict) -> dict:
+    merged = base.copy()
+    merged_markitdown = base.get("markitdown", {}).copy()
+    if isinstance(overrides.get("markitdown"), dict):
+        merged_markitdown.update(overrides["markitdown"])
+    merged.update(overrides)
+    merged["markitdown"] = merged_markitdown
+    return merged
+
+
+def apply_batch_rules(base_config: dict, file_path: str) -> dict:
+    rules = base_config.get("batch_rules") or []
+    config = base_config
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        pattern = rule.get("pattern") or rule.get("path") or rule.get("match")
+        if not pattern:
+            continue
+        if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(
+            os.path.basename(file_path), pattern
+        ):
+            overrides = rule.get("overrides") or rule.get("config") or {}
+            if isinstance(overrides, dict):
+                config = _merge_overrides(config, overrides)
+    return config
+
+
+def _provider_model(config: dict) -> tuple[str, str]:
+    provider = config.get("default_provider", "openai")
+    if provider == "ollama":
+        model = config.get("ollama_model") or config.get("llm_model", "")
+    elif provider == "anthropic":
+        model = config.get("anthropic_model") or config.get("llm_model", "")
+    elif provider == "openai":
+        model = config.get("openai_model") or config.get("llm_model", "")
+    elif provider == "google":
+        model = "gemini-pro"
+    else:
+        model = config.get("llm_model", "")
+    return provider, model
+
+
+def _build_report_path(config: dict, report_format: str, report_path: str | None) -> str:
+    if report_path:
+        return os.path.expanduser(report_path)
+    report_dir = config.get("report_dir") or os.getcwd()
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return os.path.join(report_dir, f"onoma-report-{timestamp}.{report_format}")
+
+
+def _write_report(entries: list[dict], path: str, report_format: str) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    if report_format == "csv":
+        fieldnames = [
+            "timestamp",
+            "status",
+            "original_path",
+            "final_path",
+            "suggestion",
+            "provider",
+            "model",
+            "error",
+        ]
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for entry in entries:
+                writer.writerow({k: entry.get(k, "") for k in fieldnames})
+    else:
+        with open(path, "w") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+
+
+def _load_report_entries(path: str) -> list[dict]:
+    if path.endswith(".csv"):
+        with open(path, newline="") as f:
+            return list(csv.DictReader(f))
+    entries = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entries.append(json.loads(line))
+    return entries
+
+
+def _find_latest_report(config: dict) -> str | None:
+    report_dir = config.get("report_dir") or os.getcwd()
+    candidates = []
+    for ext in ("jsonl", "csv"):
+        candidates.extend(glob.glob(os.path.join(report_dir, f"onoma-report-*.{ext}")))
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
+
+
+def _plan_rename(file_path: str, new_name: str) -> tuple[str, str]:
+    directory = os.path.dirname(file_path) or "."
+    _, ext = os.path.splitext(file_path)
+    base_new_name, _ = os.path.splitext(new_name)
+    new_name_with_ext = base_new_name + ext
+    existing_files = os.listdir(directory)
+    final_name = resolve_conflict(new_name_with_ext, existing_files)
+    final_path = os.path.join(directory, final_name)
+    return final_name, final_path
+
+
+def _undo_from_report(report_path: str) -> list[dict]:
+    entries = _load_report_entries(report_path)
+    renames = [e for e in entries if e.get("status") == "renamed"]
+    results: list[dict] = []
+    for entry in reversed(renames):
+        original_path = entry.get("original_path") or ""
+        final_path = entry.get("final_path") or entry.get("new_path") or ""
+        if not original_path or not final_path:
+            results.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "undo_error",
+                    "original_path": original_path,
+                    "final_path": final_path,
+                    "suggestion": "",
+                    "provider": "",
+                    "model": "",
+                    "error": "Missing original_path or final_path in report entry",
+                }
+            )
+            continue
+        if not os.path.exists(final_path):
+            results.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "undo_error",
+                    "original_path": original_path,
+                    "final_path": final_path,
+                    "suggestion": "",
+                    "provider": "",
+                    "model": "",
+                    "error": "Final path does not exist",
+                }
+            )
+            continue
+        target_dir = os.path.dirname(original_path) or "."
+        target_name = os.path.basename(original_path)
+        existing_files = os.listdir(target_dir)
+        safe_name = resolve_conflict(target_name, existing_files)
+        target_path = os.path.join(target_dir, safe_name)
+        try:
+            shutil.move(final_path, target_path)
+            results.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "undo",
+                    "original_path": original_path,
+                    "final_path": target_path,
+                    "suggestion": "",
+                    "provider": "",
+                    "model": "",
+                    "error": "",
+                }
+            )
+        except Exception as err:
+            results.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "status": "undo_error",
+                    "original_path": original_path,
+                    "final_path": final_path,
+                    "suggestion": "",
+                    "provider": "",
+                    "model": "",
+                    "error": str(err),
+                }
+            )
+    return results
 
 
 def main(args=None):
@@ -121,6 +307,29 @@ def main(args=None):
             action="store_true",
             help="Clear remembered last Ollama model",
         )
+        parser.add_argument(
+            "--report",
+            help="Write a report to a specific path",
+        )
+        parser.add_argument(
+            "--report-format",
+            choices=["jsonl", "csv"],
+            help="Report format (jsonl or csv)",
+        )
+        parser.add_argument(
+            "--no-report",
+            action="store_true",
+            help="Disable report output for this run",
+        )
+        parser.add_argument(
+            "--undo",
+            action="store_true",
+            help="Undo the last rename run (uses last report by default)",
+        )
+        parser.add_argument(
+            "--undo-report",
+            help="Undo using a specific report file",
+        )
         args = parser.parse_args(args)
 
         if args.save_config:
@@ -150,6 +359,37 @@ def main(args=None):
             _save_config(config, args.config)
             print("Cleared remembered selections.")
             return 0
+
+        if args.undo:
+            config = get_config(args.config)
+            report_path = (
+                args.undo_report
+                or config.get("last_report_path")
+                or _find_latest_report(config)
+            )
+            if not report_path:
+                print("No report found to undo.")
+                return 1
+            report_path = os.path.expanduser(report_path)
+            if not os.path.exists(report_path):
+                print(f"Report not found: {report_path}")
+                return 1
+            undo_entries = _undo_from_report(report_path)
+            if not undo_entries:
+                print("No renames found in report.")
+                return 1
+            report_enabled = config.get("report_enabled", True) and not args.no_report
+            report_format = args.report_format or config.get("report_format", "jsonl")
+            if report_enabled:
+                out_path = _build_report_path(config, report_format, args.report)
+                _write_report(undo_entries, out_path, report_format)
+                config["last_report_path"] = out_path
+                _save_config(config, args.config)
+                print(f"Undo report written to: {out_path}")
+            ok = sum(1 for r in undo_entries if r.get("status") == "undo")
+            err = sum(1 for r in undo_entries if r.get("status") == "undo_error")
+            print(f"Undo complete: {ok} succeeded, {err} failed.")
+            return 0 if err == 0 else 1
 
         def prompt_choice(prompt: str, options: list[str]) -> int:
             print(prompt)
@@ -282,15 +522,39 @@ def main(args=None):
             config["ollama_model"] = models[int(choice) - 1]
             config["default_provider"] = "ollama"
         files = collect_files(pattern)
-        dispatcher = FileDispatcher(config, debug=args.debug)
-
         planned_renames = []
+        report_entries: list[dict] = []
+
+        def add_report_entry(
+            status: str,
+            original_path: str,
+            final_path: str = "",
+            suggestion: str = "",
+            error: str = "",
+            provider: str = "",
+            model_name: str = "",
+        ) -> None:
+            report_entries.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "status": status,
+                    "original_path": os.path.abspath(original_path),
+                    "final_path": os.path.abspath(final_path) if final_path else "",
+                    "suggestion": suggestion,
+                    "provider": provider,
+                    "model": model_name,
+                    "error": error,
+                }
+            )
 
         # List to hold tempdir references in debug mode to prevent garbage collection
         debug_tempdirs = []
 
         for file_path in files:
             print(f"Processing file: {file_path}")
+            file_config = apply_batch_rules(config, file_path)
+            dispatcher = FileDispatcher(file_config, debug=args.debug)
+            provider, model_name = _provider_model(file_config)
             _, ext = os.path.splitext(file_path)
             is_svg = ext.lower() == ".svg"
             tempdir = None
@@ -316,6 +580,12 @@ def main(args=None):
                     continue
             result = dispatcher.process(file_path)
             if not result:
+                add_report_entry(
+                    "skipped",
+                    file_path,
+                    provider=provider,
+                    model_name=model_name,
+                )
                 if tempdir is not None and not args.debug:
                     tempdir.cleanup()
                 continue
@@ -327,7 +597,7 @@ def main(args=None):
                         "",
                         verbose_level=verbose_level,
                         file_path=png_path,
-                        config=config,
+                        config=file_config,
                     )
                     if img_suggestions:
                         all_image_suggestions.append(img_suggestions)
@@ -340,7 +610,7 @@ def main(args=None):
                         else result.get("markdown", ""),
                         verbose_level=verbose_level,
                         file_path=png_path,
-                        config=config,
+                        config=file_config,
                     )
                     guidance = "\n".join(flat_image_suggestions)
                     final_prompt = (
@@ -356,26 +626,47 @@ def main(args=None):
                         final_prompt,
                         verbose_level=verbose_level,
                         file_path=png_path,
-                        config=config,
+                        config=file_config,
                     )
                     suggestions = (
                         final_suggestions or md_suggestions or flat_image_suggestions
                     )
                     if suggestions:
                         new_name = suggestions[0]
-                        directory = os.path.dirname(file_path) or "."
-                        base_new_name, _ = os.path.splitext(new_name)
-                        new_name_with_ext = base_new_name + ext
-                        existing_files = os.listdir(directory)
-                        final_name = resolve_conflict(new_name_with_ext, existing_files)
+                        final_name, final_path = _plan_rename(file_path, new_name)
                         if args.dry_run:
                             print(
                                 f"{os.path.basename(file_path)} --dry-run-> {final_name}"
                             )
-                            planned_renames.append((file_path, new_name))
+                            planned_renames.append(
+                                (file_path, new_name, final_path, provider, model_name)
+                            )
+                            add_report_entry(
+                                "dry_run",
+                                file_path,
+                                final_path,
+                                new_name,
+                                provider=provider,
+                                model_name=model_name,
+                            )
                         else:
                             print(f"{os.path.basename(file_path)} --> {final_name}")
-                            rename_file(file_path, new_name)
+                            final_path = rename_file(file_path, new_name)
+                            add_report_entry(
+                                "renamed",
+                                file_path,
+                                final_path,
+                                new_name,
+                                provider=provider,
+                                model_name=model_name,
+                            )
+                    else:
+                        add_report_entry(
+                            "skipped",
+                            file_path,
+                            provider=provider,
+                            model_name=model_name,
+                        )
                 else:
                     # Non-SVG logic unchanged
                     if (
@@ -406,7 +697,7 @@ def main(args=None):
                                 "",
                                 verbose_level=verbose_level,
                                 file_path=img_path,
-                                config=config,
+                                config=file_config,
                             )
                             if img_suggestions:
                                 all_image_suggestions.append(img_suggestions)
@@ -418,7 +709,7 @@ def main(args=None):
                             result["markdown"],
                             verbose_level=verbose_level,
                             file_path=md_file_path,
-                            config=config,
+                            config=file_config,
                         )
                         guidance = "\n".join(flat_image_suggestions)
                         final_prompt = (
@@ -434,7 +725,7 @@ def main(args=None):
                             final_prompt,
                             verbose_level=verbose_level,
                             file_path=md_file_path,
-                            config=config,
+                            config=file_config,
                         )
                         suggestions = (
                             final_suggestions
@@ -443,22 +734,47 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]
-                            directory = os.path.dirname(file_path) or "."
-                            _, ext = os.path.splitext(file_path)
-                            base_new_name, _ = os.path.splitext(new_name)
-                            new_name_with_ext = base_new_name + ext
-                            existing_files = os.listdir(directory)
-                            final_name = resolve_conflict(
-                                new_name_with_ext, existing_files
-                            )
+                            final_name, final_path = _plan_rename(file_path, new_name)
                             if args.dry_run:
                                 print(
                                     f"{os.path.basename(file_path)} --dry-run-> {final_name}"
                                 )
-                                planned_renames.append((file_path, new_name))
+                                planned_renames.append(
+                                    (file_path, new_name, final_path, provider, model_name)
+                                )
+                                add_report_entry(
+                                    "dry_run",
+                                    file_path,
+                                    final_path,
+                                    new_name,
+                                    provider=provider,
+                                    model_name=model_name,
+                                )
                             else:
                                 print(f"{os.path.basename(file_path)} --> {final_name}")
-                                rename_file(file_path, new_name)
+                                final_path = rename_file(file_path, new_name)
+                                add_report_entry(
+                                    "renamed",
+                                    file_path,
+                                    final_path,
+                                    new_name,
+                                    provider=provider,
+                                    model_name=model_name,
+                                )
+                        else:
+                            add_report_entry(
+                                "skipped",
+                                file_path,
+                                provider=provider,
+                                model_name=model_name,
+                            )
+                        else:
+                            add_report_entry(
+                                "skipped",
+                                file_path,
+                                provider=provider,
+                                model_name=model_name,
+                            )
                     elif isinstance(result, dict) and "tempdir" in result:
                         # Handle files with tempdir but no images (text files, Word docs, etc. in debug mode)
                         file_tempdir = result.get("tempdir")
@@ -484,52 +800,81 @@ def main(args=None):
                             content,
                             verbose_level=verbose_level,
                             file_path=file_path,
-                            config=config,
+                            config=file_config,
                         )
                         if suggestions:
                             new_name = suggestions[0]
-                            directory = os.path.dirname(file_path) or "."
-                            _, ext = os.path.splitext(file_path)
-                            base_new_name, _ = os.path.splitext(new_name)
-                            new_name_with_ext = base_new_name + ext
-                            existing_files = os.listdir(directory)
-                            final_name = resolve_conflict(
-                                new_name_with_ext, existing_files
-                            )
+                            final_name, final_path = _plan_rename(file_path, new_name)
                             if args.dry_run:
                                 print(
                                     f"{os.path.basename(file_path)} --dry-run-> {final_name}"
                                 )
-                                planned_renames.append((file_path, new_name))
+                                planned_renames.append(
+                                    (file_path, new_name, final_path, provider, model_name)
+                                )
+                                add_report_entry(
+                                    "dry_run",
+                                    file_path,
+                                    final_path,
+                                    new_name,
+                                    provider=provider,
+                                    model_name=model_name,
+                                )
                             else:
                                 print(f"{os.path.basename(file_path)} --> {final_name}")
-                                rename_file(file_path, new_name)
+                                final_path = rename_file(file_path, new_name)
+                                add_report_entry(
+                                    "renamed",
+                                    file_path,
+                                    final_path,
+                                    new_name,
+                                    provider=provider,
+                                    model_name=model_name,
+                                )
                     else:
                         content = result
                         suggestions = get_suggestions(
                             content,
                             verbose_level=verbose_level,
                             file_path=file_path,
-                            config=config,
+                            config=file_config,
                         )
                         if suggestions:
                             new_name = suggestions[0]  # Use first suggestion in Phase 1
-                            directory = os.path.dirname(file_path) or "."
-                            _, ext = os.path.splitext(file_path)
-                            base_new_name, _ = os.path.splitext(new_name)
-                            new_name_with_ext = base_new_name + ext
-                            existing_files = os.listdir(directory)
-                            final_name = resolve_conflict(
-                                new_name_with_ext, existing_files
-                            )
+                            final_name, final_path = _plan_rename(file_path, new_name)
                             if args.dry_run:
                                 print(
                                     f"{os.path.basename(file_path)} --dry-run-> {final_name}"
                                 )
-                                planned_renames.append((file_path, new_name))
+                                planned_renames.append(
+                                    (file_path, new_name, final_path, provider, model_name)
+                                )
+                                add_report_entry(
+                                    "dry_run",
+                                    file_path,
+                                    final_path,
+                                    new_name,
+                                    provider=provider,
+                                    model_name=model_name,
+                                )
                             else:
                                 print(f"{os.path.basename(file_path)} --> {final_name}")
-                                rename_file(file_path, new_name)
+                                final_path = rename_file(file_path, new_name)
+                                add_report_entry(
+                                    "renamed",
+                                    file_path,
+                                    final_path,
+                                    new_name,
+                                    provider=provider,
+                                    model_name=model_name,
+                                )
+                        else:
+                            add_report_entry(
+                                "skipped",
+                                file_path,
+                                provider=provider,
+                                model_name=model_name,
+                            )
             finally:
                 # Clean up SVG tempdir if not in debug mode
                 if tempdir is not None:
@@ -558,17 +903,29 @@ def main(args=None):
         if args.dry_run and args.interactive and planned_renames:
             confirm = input("\nProceed with these renames? [y/N]: ").strip().lower()
             if confirm == "y":
-                for file_path, new_name in planned_renames:
-                    directory = os.path.dirname(file_path) or "."
-                    _, ext = os.path.splitext(file_path)
-                    base_new_name, _ = os.path.splitext(new_name)
-                    new_name_with_ext = base_new_name + ext
-                    existing_files = os.listdir(directory)
-                    final_name = resolve_conflict(new_name_with_ext, existing_files)
+                for file_path, new_name, _final_path, provider, model_name in planned_renames:
+                    final_name, _ = _plan_rename(file_path, new_name)
                     print(f"{os.path.basename(file_path)} --> {final_name}")
-                    rename_file(file_path, new_name)
+                    final_path = rename_file(file_path, new_name)
+                    add_report_entry(
+                        "renamed",
+                        file_path,
+                        final_path,
+                        new_name,
+                        provider=provider,
+                        model_name=model_name,
+                    )
             else:
                 print("Aborted. No files were renamed.")
+
+        report_enabled = config.get("report_enabled", True) and not args.no_report
+        if report_enabled and report_entries:
+            report_format = args.report_format or config.get("report_format", "jsonl")
+            report_path = _build_report_path(config, report_format, args.report)
+            _write_report(report_entries, report_path, report_format)
+            config["last_report_path"] = report_path
+            _save_config(config, args.config)
+            print(f"Report written to: {report_path}")
     except KeyboardInterrupt:
         print("\nOperation cancelled by user (Ctrl+C). Exiting gracefully.")
         return 130

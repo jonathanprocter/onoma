@@ -4,10 +4,11 @@ import shutil
 from .conflict_resolver import resolve_conflict
 
 
-def rename_file(original_path: str, new_name: str) -> None:
+def rename_file(original_path: str, new_name: str) -> str:
     """
     Rename a file, resolving conflicts using numeric suffixes.
     Always preserve the original file extension.
+    Returns the final path.
 
     Args:
         original_path: Path to the original file
@@ -29,3 +30,4 @@ def rename_file(original_path: str, new_name: str) -> None:
 
     # Perform the rename
     shutil.move(original_path, final_path)
+    return final_path

@@ -30,6 +30,11 @@ DEFAULT_CONFIG = {
         "enable_plugins": False,
         "docintel_endpoint": "",
     },
+    "report_enabled": True,
+    "report_format": "jsonl",
+    "report_dir": "",
+    "last_report_path": "",
+    "batch_rules": [],
 }
 
 
