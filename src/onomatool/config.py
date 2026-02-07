@@ -26,6 +26,11 @@ DEFAULT_CONFIG = {
     "system_prompt": "",
     "user_prompt": "",
     "image_prompt": "",
+    "enforce_title_case": True,
+    "apply_titlecase_all": False,
+    "subtitle_separator": " - ",
+    "acronyms_path": "",
+    "strip_metadata": True,
     "markitdown": {
         "enable_plugins": False,
         "docintel_endpoint": "",

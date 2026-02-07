@@ -231,6 +231,13 @@ system_prompt = "You are a file naming assistant."
 user_prompt = "Suggest 3 file names for: {content}"
 image_prompt = "Suggest 3 file names for this image."
 
+# Title Case cleanup (post-processing)
+enforce_title_case = true          # force absolute Title Case
+apply_titlecase_all = false        # apply Title Case to all naming conventions
+subtitle_separator = " - "         # replaces colons and normalizes subtitles
+acronyms_path = ""                 # optional path to acronyms.txt (one per line)
+strip_metadata = true              # remove years/ISBN/author suffixes
+
 # Markitdown Configuration
 [markitdown]
 enable_plugins = false

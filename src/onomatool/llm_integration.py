@@ -11,6 +11,7 @@ from onomatool.models import (
     get_model_for_naming_convention,
 )
 from onomatool.prompts import get_image_prompt, get_system_prompt, get_user_prompt
+from onomatool.utils.titlecase_utils import apply_titlecase
 
 # Maximum tokens for LLM response - limits response to 100 tokens
 MAX_TOKENS = 100
@@ -37,6 +38,22 @@ def list_ollama_models(config: dict) -> list[str]:
         return sorted(dict.fromkeys(models))
     except Exception as err:
         raise RuntimeError(f"Failed to list Ollama models: {err}") from err
+
+
+def postprocess_suggestions(
+    suggestions: list[str],
+    naming_convention: str,
+    config: dict,
+    file_path: str | None = None,
+) -> list[str]:
+    if not suggestions:
+        return suggestions
+    apply_all = config.get("apply_titlecase_all", False)
+    should_titlecase = apply_all or naming_convention == "natural language"
+    if not should_titlecase:
+        return suggestions
+    ext = os.path.splitext(file_path)[1] if file_path else None
+    return [apply_titlecase(s, config=config, original_ext=ext) for s in suggestions]
 
 
 def get_pydantic_model_and_schema(naming_convention: str) -> tuple:
@@ -533,21 +550,34 @@ def get_suggestions(
         try:
             if attempt_provider == "openai":
                 model = config.get("openai_model") or model
-                return call_openai()
+                return postprocess_suggestions(
+                    call_openai(), naming_convention, config, file_path
+                )
             if attempt_provider == "anthropic":
                 model = config.get("anthropic_model") or model
-                return call_anthropic()
+                return postprocess_suggestions(
+                    call_anthropic(), naming_convention, config, file_path
+                )
             if attempt_provider == "ollama":
                 model = config.get("ollama_model") or model
-                return call_ollama()
+                return postprocess_suggestions(
+                    call_ollama(), naming_convention, config, file_path
+                )
             if attempt_provider == "google":
-                return call_google()
+                return postprocess_suggestions(
+                    call_google(), naming_convention, config, file_path
+                )
             if attempt_provider == "mock":
-                return get_suggestions(
-                    content,
-                    verbose_level=verbose_level,
-                    file_path=file_path,
-                    config={"default_provider": "mock", **config},
+                return postprocess_suggestions(
+                    get_suggestions(
+                        content,
+                        verbose_level=verbose_level,
+                        file_path=file_path,
+                        config={"default_provider": "mock", **config},
+                    ),
+                    naming_convention,
+                    config,
+                    file_path,
                 )
             raise RuntimeError(f"Unsupported provider: {attempt_provider}")
         except Exception as err:
