@@ -183,6 +183,9 @@ onoma '*.pdf' --report ./reports/run-001.jsonl
 # Use CSV format
 onoma '*.pdf' --report-format csv
 
+# Use HTML format (includes before/after diff)
+onoma '*.pdf' --report-format html
+
 # Disable report output
 onoma '*.pdf' --no-report
 
@@ -259,6 +262,7 @@ report_format = "jsonl"     # jsonl or csv
 report_dir = ""             # empty = current working directory
 last_report_path = ""       # auto-managed
 duplicates_dir = "duplicates" # folder for detected duplicates
+fuzzy_duplicate_threshold = 0.9 # similarity threshold for fuzzy warnings
 
 # Batch rules (per-path overrides)
 [[batch_rules]]

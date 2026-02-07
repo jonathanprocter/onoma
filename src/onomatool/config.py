@@ -41,6 +41,7 @@ DEFAULT_CONFIG = {
     "last_report_path": "",
     "batch_rules": [],
     "duplicates_dir": "duplicates",
+    "fuzzy_duplicate_threshold": 0.9,
 }
 
 

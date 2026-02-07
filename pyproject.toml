@@ -43,6 +43,7 @@ dependencies = [
     "toml>=0.10.2",
     "titlecase>=2.4.1",
     "tiktoken>=0.9.0",
+    "rapidfuzz>=3.9.0",
     "pydantic>=2.11.7",
     "httpx>=0.28.1",
     "chardet>=5.2.0",

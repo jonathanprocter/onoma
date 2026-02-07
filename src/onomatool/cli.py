@@ -3,6 +3,7 @@ import csv
 import fnmatch
 import glob
 import json
+import difflib
 import os
 import shutil
 import sys
@@ -92,6 +93,40 @@ def _write_report(entries: list[dict], path: str, report_format: str) -> None:
             writer.writeheader()
             for entry in entries:
                 writer.writerow({k: entry.get(k, "") for k in fieldnames})
+    elif report_format == "html":
+        rows = []
+        for e in entries:
+            before = os.path.basename(e.get("original_path", ""))
+            after = os.path.basename(e.get("final_path", "")) if e.get("final_path") else ""
+            diff = "".join(
+                (
+                    f"<ins>{d[2:]}</ins>" if d.startswith("+ ")
+                    else f"<del>{d[2:]}</del>" if d.startswith("- ")
+                    else d[2:]
+                )
+                for d in difflib.ndiff(before, after)
+            )
+            rows.append(
+                f"<tr><td>{e.get('timestamp','')}</td><td>{e.get('status','')}</td>"
+                f"<td>{e.get('original_path','')}</td><td>{e.get('final_path','')}</td>"
+                f"<td>{e.get('suggestion','')}</td><td>{e.get('provider','')}</td>"
+                f"<td>{e.get('model','')}</td><td>{e.get('error','')}</td>"
+                f"<td>{diff}</td></tr>"
+            )
+        html = (
+            "<html><head><meta charset='utf-8'/>"
+            "<style>body{font-family:sans-serif}table{border-collapse:collapse;width:100%}"
+            "td,th{border:1px solid #ddd;padding:6px}ins{background:#c7f5c7;text-decoration:none}"
+            "del{background:#f7c3c3}</style></head><body>"
+            "<h2>Onoma Report</h2><table><tr>"
+            "<th>Timestamp</th><th>Status</th><th>Original</th><th>Final</th>"
+            "<th>Suggestion</th><th>Provider</th><th>Model</th><th>Error</th><th>Diff</th>"
+            "</tr>"
+            + "".join(rows)
+            + "</table></body></html>"
+        )
+        with open(path, "w") as f:
+            f.write(html)
     else:
         with open(path, "w") as f:
             for entry in entries:
@@ -148,6 +183,8 @@ def _hash_file(path: str, chunk_size: int = 1024 * 1024) -> str:
 
 def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
     duplicates_dir_name = config.get("duplicates_dir", "duplicates")
+    fuzzy_threshold = float(config.get("fuzzy_duplicate_threshold", 0.9))
+    fuzzy_candidates: list[tuple[str, str]] = []
     # Build desired targets
     desired = []
     for item in items:
@@ -251,6 +288,32 @@ def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
                     "suggestion": entry["suggestion"],
                     "provider": provider,
                     "model": model_name,
+                }
+            )
+
+    # Fuzzy duplicate detection (advisory)
+    try:
+        from rapidfuzz import fuzz
+
+        titles = [(p["original_path"], os.path.basename(p["target_path"])) for p in plan if p["action"] == "rename"]
+        for i in range(len(titles)):
+            for j in range(i + 1, len(titles)):
+                score = fuzz.ratio(titles[i][1], titles[j][1]) / 100.0
+                if score >= fuzzy_threshold:
+                    fuzzy_candidates.append((titles[i][0], titles[j][0]))
+    except Exception:
+        pass
+
+    if fuzzy_candidates:
+        for a, b in fuzzy_candidates:
+            plan.append(
+                {
+                    "action": "fuzzy_duplicate",
+                    "original_path": a,
+                    "target_path": b,
+                    "suggestion": "",
+                    "provider": "",
+                    "model": "",
                 }
             )
 
@@ -435,8 +498,8 @@ def main(args=None):
         )
         parser.add_argument(
             "--report-format",
-            choices=["jsonl", "csv"],
-            help="Report format (jsonl or csv)",
+            choices=["jsonl", "csv", "html"],
+            help="Report format (jsonl, csv, or html)",
         )
         parser.add_argument(
             "--no-report",
@@ -966,6 +1029,15 @@ def main(args=None):
                         provider=entry.get("provider", ""),
                         model_name=entry.get("model", ""),
                     )
+                elif action == "fuzzy_duplicate":
+                    add_report_entry(
+                        "fuzzy_duplicate",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
                 else:
                     add_report_entry(
                         "skipped",
@@ -1005,6 +1077,15 @@ def main(args=None):
                                 provider=entry.get("provider", ""),
                                 model_name=entry.get("model", ""),
                             )
+                        elif action == "fuzzy_duplicate":
+                            add_report_entry(
+                                "fuzzy_duplicate",
+                                src,
+                                dst,
+                                entry.get("suggestion", ""),
+                                provider=entry.get("provider", ""),
+                                model_name=entry.get("model", ""),
+                            )
                         else:
                             add_report_entry(
                                 "skipped",
@@ -1037,6 +1118,15 @@ def main(args=None):
                     shutil.move(src, dst)
                     add_report_entry(
                         "duplicate",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
+                elif action == "fuzzy_duplicate":
+                    add_report_entry(
+                        "fuzzy_duplicate",
                         src,
                         dst,
                         entry.get("suggestion", ""),
