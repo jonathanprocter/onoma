@@ -193,6 +193,12 @@ onoma --undo
 onoma --undo --undo-report ./reports/run-001.jsonl
 ```
 
+### Duplicate handling
+If multiple files would resolve to the same final name (case-insensitive), Onoma will:
+1) Compute hashes to find identical duplicates.
+2) Move duplicates into `duplicates_dir` (default `duplicates/`).
+3) Apply a numeric suffix to non-identical collisions.
+
 ### Forget remembered selections
 ```bash
 # Clear all remembered selections (provider/model/pattern)
@@ -252,6 +258,7 @@ report_enabled = true
 report_format = "jsonl"     # jsonl or csv
 report_dir = ""             # empty = current working directory
 last_report_path = ""       # auto-managed
+duplicates_dir = "duplicates" # folder for detected duplicates
 
 # Batch rules (per-path overrides)
 [[batch_rules]]

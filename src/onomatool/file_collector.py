@@ -1,4 +1,5 @@
 import glob
+import os
 
 
 def collect_files(pattern: str) -> list[str]:
@@ -11,4 +12,12 @@ def collect_files(pattern: str) -> list[str]:
     Returns:
         List of file paths matching the pattern
     """
-    return glob.glob(pattern, recursive=True)
+    paths = glob.glob(pattern, recursive=True)
+    files = []
+    for path in paths:
+        if os.path.islink(path):
+            continue
+        if not os.path.isfile(path):
+            continue
+        files.append(path)
+    return files

@@ -17,7 +17,6 @@ from onomatool.conflict_resolver import resolve_conflict
 from onomatool.file_collector import collect_files
 from onomatool.file_dispatcher import FileDispatcher
 from onomatool.llm_integration import get_suggestions, list_ollama_models
-from onomatool.renamer import rename_file
 from onomatool.utils.image_utils import convert_svg_to_png
 
 # Add project root to sys.path
@@ -133,6 +132,129 @@ def _plan_rename(file_path: str, new_name: str) -> tuple[str, str]:
     final_path = os.path.join(directory, final_name)
     return final_name, final_path
 
+
+def _hash_file(path: str, chunk_size: int = 1024 * 1024) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
+    duplicates_dir_name = config.get("duplicates_dir", "duplicates")
+    # Build desired targets
+    desired = []
+    for item in items:
+        orig = item["original_path"]
+        suggestion = item["suggestion"]
+        directory = os.path.dirname(orig) or "."
+        _, ext = os.path.splitext(orig)
+        base_new, _ = os.path.splitext(suggestion)
+        desired_name = base_new + ext
+        desired.append(
+            {
+                **item,
+                "directory": directory,
+                "desired_name": desired_name,
+                "desired_key": os.path.join(directory, desired_name).lower(),
+            }
+        )
+
+    # Collision groups (case-insensitive)
+    collision_groups: dict[str, list[dict]] = {}
+    for d in desired:
+        collision_groups.setdefault(d["desired_key"], []).append(d)
+
+    duplicates: set[str] = set()
+    for group in collision_groups.values():
+        if len(group) < 2:
+            continue
+        # hash-based duplicate detection
+        hash_map: dict[str, list[dict]] = {}
+        for entry in group:
+            try:
+                h = _hash_file(entry["original_path"])
+            except Exception:
+                h = ""
+            hash_map.setdefault(h, []).append(entry)
+        for h, entries in hash_map.items():
+            if h and len(entries) > 1:
+                # keep first, mark rest as duplicates
+                for dup in entries[1:]:
+                    duplicates.add(dup["original_path"])
+
+    # Resolve final names
+    plan: list[dict] = []
+    per_dir_existing: dict[str, list[str]] = {}
+    per_dir_lower: dict[str, set[str]] = {}
+
+    for entry in desired:
+        orig = entry["original_path"]
+        directory = entry["directory"]
+        desired_name = entry["desired_name"]
+        provider = entry.get("provider", "")
+        model_name = entry.get("model", "")
+
+        if directory not in per_dir_existing:
+            per_dir_existing[directory] = os.listdir(directory)
+            per_dir_lower[directory] = {n.lower() for n in per_dir_existing[directory]}
+
+        if orig in duplicates:
+            dup_dir = os.path.join(directory, duplicates_dir_name)
+            os.makedirs(dup_dir, exist_ok=True)
+            dup_existing = os.listdir(dup_dir)
+            dup_name = resolve_conflict(os.path.basename(orig), dup_existing)
+            target_path = os.path.join(dup_dir, dup_name)
+            plan.append(
+                {
+                    "action": "duplicate",
+                    "original_path": orig,
+                    "target_path": target_path,
+                    "suggestion": entry["suggestion"],
+                    "provider": provider,
+                    "model": model_name,
+                }
+            )
+            continue
+
+        if desired_name.lower() in per_dir_lower[directory]:
+            final_name = resolve_conflict(desired_name, per_dir_existing[directory])
+        else:
+            final_name = desired_name
+        per_dir_existing[directory].append(final_name)
+        per_dir_lower[directory].add(final_name.lower())
+        target_path = os.path.join(directory, final_name)
+
+        if os.path.abspath(orig) == os.path.abspath(target_path):
+            plan.append(
+                {
+                    "action": "skip",
+                    "original_path": orig,
+                    "target_path": target_path,
+                    "suggestion": entry["suggestion"],
+                    "provider": provider,
+                    "model": model_name,
+                }
+            )
+        else:
+            plan.append(
+                {
+                    "action": "rename",
+                    "original_path": orig,
+                    "target_path": target_path,
+                    "suggestion": entry["suggestion"],
+                    "provider": provider,
+                    "model": model_name,
+                }
+            )
+
+    return plan
 
 def _undo_from_report(report_path: str) -> list[dict]:
     entries = _load_report_entries(report_path)
@@ -522,7 +644,7 @@ def main(args=None):
             config["ollama_model"] = models[int(choice) - 1]
             config["default_provider"] = "ollama"
         files = collect_files(pattern)
-        planned_renames = []
+        planned_renames: list[dict] = []
         report_entries: list[dict] = []
 
         def add_report_entry(
@@ -633,33 +755,14 @@ def main(args=None):
                     )
                     if suggestions:
                         new_name = suggestions[0]
-                        final_name, final_path = _plan_rename(file_path, new_name)
-                        if args.dry_run:
-                            print(
-                                f"{os.path.basename(file_path)} --dry-run-> {final_name}"
-                            )
-                            planned_renames.append(
-                                (file_path, new_name, final_path, provider, model_name)
-                            )
-                            add_report_entry(
-                                "dry_run",
-                                file_path,
-                                final_path,
-                                new_name,
-                                provider=provider,
-                                model_name=model_name,
-                            )
-                        else:
-                            print(f"{os.path.basename(file_path)} --> {final_name}")
-                            final_path = rename_file(file_path, new_name)
-                            add_report_entry(
-                                "renamed",
-                                file_path,
-                                final_path,
-                                new_name,
-                                provider=provider,
-                                model_name=model_name,
-                            )
+                        planned_renames.append(
+                            {
+                                "original_path": file_path,
+                                "suggestion": new_name,
+                                "provider": provider,
+                                "model": model_name,
+                            }
+                        )
                     else:
                         add_report_entry(
                             "skipped",
@@ -734,39 +837,13 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]
-                            final_name, final_path = _plan_rename(file_path, new_name)
-                            if args.dry_run:
-                                print(
-                                    f"{os.path.basename(file_path)} --dry-run-> {final_name}"
-                                )
-                                planned_renames.append(
-                                    (file_path, new_name, final_path, provider, model_name)
-                                )
-                                add_report_entry(
-                                    "dry_run",
-                                    file_path,
-                                    final_path,
-                                    new_name,
-                                    provider=provider,
-                                    model_name=model_name,
-                                )
-                            else:
-                                print(f"{os.path.basename(file_path)} --> {final_name}")
-                                final_path = rename_file(file_path, new_name)
-                                add_report_entry(
-                                    "renamed",
-                                    file_path,
-                                    final_path,
-                                    new_name,
-                                    provider=provider,
-                                    model_name=model_name,
-                                )
-                        else:
-                            add_report_entry(
-                                "skipped",
-                                file_path,
-                                provider=provider,
-                                model_name=model_name,
+                            planned_renames.append(
+                                {
+                                    "original_path": file_path,
+                                    "suggestion": new_name,
+                                    "provider": provider,
+                                    "model": model_name,
+                                }
                             )
                         else:
                             add_report_entry(
@@ -804,33 +881,14 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]
-                            final_name, final_path = _plan_rename(file_path, new_name)
-                            if args.dry_run:
-                                print(
-                                    f"{os.path.basename(file_path)} --dry-run-> {final_name}"
-                                )
-                                planned_renames.append(
-                                    (file_path, new_name, final_path, provider, model_name)
-                                )
-                                add_report_entry(
-                                    "dry_run",
-                                    file_path,
-                                    final_path,
-                                    new_name,
-                                    provider=provider,
-                                    model_name=model_name,
-                                )
-                            else:
-                                print(f"{os.path.basename(file_path)} --> {final_name}")
-                                final_path = rename_file(file_path, new_name)
-                                add_report_entry(
-                                    "renamed",
-                                    file_path,
-                                    final_path,
-                                    new_name,
-                                    provider=provider,
-                                    model_name=model_name,
-                                )
+                            planned_renames.append(
+                                {
+                                    "original_path": file_path,
+                                    "suggestion": new_name,
+                                    "provider": provider,
+                                    "model": model_name,
+                                }
+                            )
                     else:
                         content = result
                         suggestions = get_suggestions(
@@ -841,33 +899,14 @@ def main(args=None):
                         )
                         if suggestions:
                             new_name = suggestions[0]  # Use first suggestion in Phase 1
-                            final_name, final_path = _plan_rename(file_path, new_name)
-                            if args.dry_run:
-                                print(
-                                    f"{os.path.basename(file_path)} --dry-run-> {final_name}"
-                                )
-                                planned_renames.append(
-                                    (file_path, new_name, final_path, provider, model_name)
-                                )
-                                add_report_entry(
-                                    "dry_run",
-                                    file_path,
-                                    final_path,
-                                    new_name,
-                                    provider=provider,
-                                    model_name=model_name,
-                                )
-                            else:
-                                print(f"{os.path.basename(file_path)} --> {final_name}")
-                                final_path = rename_file(file_path, new_name)
-                                add_report_entry(
-                                    "renamed",
-                                    file_path,
-                                    final_path,
-                                    new_name,
-                                    provider=provider,
-                                    model_name=model_name,
-                                )
+                            planned_renames.append(
+                                {
+                                    "original_path": file_path,
+                                    "suggestion": new_name,
+                                    "provider": provider,
+                                    "model": model_name,
+                                }
+                            )
                         else:
                             add_report_entry(
                                 "skipped",
@@ -900,23 +939,119 @@ def main(args=None):
                     else:
                         file_tempdir.cleanup()
 
-        if args.dry_run and args.interactive and planned_renames:
-            confirm = input("\nProceed with these renames? [y/N]: ").strip().lower()
-            if confirm == "y":
-                for file_path, new_name, _final_path, provider, model_name in planned_renames:
-                    final_name, _ = _plan_rename(file_path, new_name)
-                    print(f"{os.path.basename(file_path)} --> {final_name}")
-                    final_path = rename_file(file_path, new_name)
+        plan = _build_rename_plan(planned_renames, config)
+
+        if args.dry_run:
+            for entry in plan:
+                action = entry["action"]
+                src = entry["original_path"]
+                dst = entry["target_path"]
+                if action == "rename":
+                    print(f"{os.path.basename(src)} --dry-run-> {os.path.basename(dst)}")
+                    add_report_entry(
+                        "dry_run",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
+                elif action == "duplicate":
+                    print(f"{os.path.basename(src)} --dry-run-> DUPLICATE {os.path.basename(dst)}")
+                    add_report_entry(
+                        "dry_run_duplicate",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
+                else:
+                    add_report_entry(
+                        "skipped",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
+
+            if args.interactive and plan:
+                confirm = input("\nProceed with these renames? [y/N]: ").strip().lower()
+                if confirm == "y":
+                    for entry in plan:
+                        action = entry["action"]
+                        src = entry["original_path"]
+                        dst = entry["target_path"]
+                        if action == "rename":
+                            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                            shutil.move(src, dst)
+                            add_report_entry(
+                                "renamed",
+                                src,
+                                dst,
+                                entry.get("suggestion", ""),
+                                provider=entry.get("provider", ""),
+                                model_name=entry.get("model", ""),
+                            )
+                        elif action == "duplicate":
+                            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                            shutil.move(src, dst)
+                            add_report_entry(
+                                "duplicate",
+                                src,
+                                dst,
+                                entry.get("suggestion", ""),
+                                provider=entry.get("provider", ""),
+                                model_name=entry.get("model", ""),
+                            )
+                        else:
+                            add_report_entry(
+                                "skipped",
+                                src,
+                                dst,
+                                entry.get("suggestion", ""),
+                                provider=entry.get("provider", ""),
+                                model_name=entry.get("model", ""),
+                            )
+                else:
+                    print("Aborted. No files were renamed.")
+        else:
+            for entry in plan:
+                action = entry["action"]
+                src = entry["original_path"]
+                dst = entry["target_path"]
+                if action == "rename":
+                    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                    shutil.move(src, dst)
                     add_report_entry(
                         "renamed",
-                        file_path,
-                        final_path,
-                        new_name,
-                        provider=provider,
-                        model_name=model_name,
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
                     )
-            else:
-                print("Aborted. No files were renamed.")
+                elif action == "duplicate":
+                    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+                    shutil.move(src, dst)
+                    add_report_entry(
+                        "duplicate",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
+                else:
+                    add_report_entry(
+                        "skipped",
+                        src,
+                        dst,
+                        entry.get("suggestion", ""),
+                        provider=entry.get("provider", ""),
+                        model_name=entry.get("model", ""),
+                    )
 
         report_enabled = config.get("report_enabled", True) and not args.no_report
         if report_enabled and report_entries:

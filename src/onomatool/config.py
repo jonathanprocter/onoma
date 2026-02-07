@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "report_dir": "",
     "last_report_path": "",
     "batch_rules": [],
+    "duplicates_dir": "duplicates",
 }
 
 
