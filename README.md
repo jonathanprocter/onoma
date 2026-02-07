@@ -189,6 +189,9 @@ onoma '*.pdf' --report-format html
 # Disable report output
 onoma '*.pdf' --no-report
 
+# Undo script is written alongside the report
+ls ./reports/run-001.jsonl.undo.sh
+
 # Undo last run (uses last report automatically)
 onoma --undo
 
@@ -201,6 +204,12 @@ If multiple files would resolve to the same final name (case-insensitive), Onoma
 1) Compute hashes to find identical duplicates.
 2) Move duplicates into `duplicates_dir` (default `duplicates/`).
 3) Apply a numeric suffix to non-identical collisions.
+
+### Folder renaming (optional)
+```bash
+# Rename folders bottom-up using title casing
+onoma --rename-folders '*.pdf'
+```
 
 ### Forget remembered selections
 ```bash
@@ -258,11 +267,12 @@ max_filename_words = 15     # Maximum words allowed (prevents overly long names)
 
 # Reports
 report_enabled = true
-report_format = "jsonl"     # jsonl or csv
+report_format = "jsonl"     # jsonl, csv, or html
 report_dir = ""             # empty = current working directory
 last_report_path = ""       # auto-managed
 duplicates_dir = "duplicates" # folder for detected duplicates
 fuzzy_duplicate_threshold = 0.9 # similarity threshold for fuzzy warnings
+rename_folders = false      # rename folders bottom-up
 
 # Batch rules (per-path overrides)
 [[batch_rules]]

@@ -77,6 +77,7 @@ ROMAN_RE = re.compile(
 ORDINAL_RE = re.compile(r"^\d+(st|nd|rd|th)$", re.IGNORECASE)
 
 YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+ISBN_RE = re.compile(r"\b97[89][- ]?\d{1,5}[- ]?\d{1,7}[- ]?\d{1,7}[- ]?\d\b", re.IGNORECASE)
 
 KNOWN_EXTS = {
     ".pdf",
@@ -262,3 +263,46 @@ def apply_titlecase(raw_title: str, config: dict | None = None, original_ext: st
     for upper, canonical in acronym_map.items():
         text = re.sub(rf"\\b{re.escape(upper)}\\b", canonical, text)
     return text.strip()
+
+
+def evaluate_title(title: str, config: dict | None = None) -> tuple[float, list[str]]:
+    cfg = config or {}
+    flags: list[str] = []
+    score = 0.0
+
+    acronyms = _load_acronyms(cfg)
+    acronym_map = _acronym_map(acronyms)
+
+    # Word count (2-15)
+    words = [w for w in re.split(r"\s+", title.strip()) if w]
+    if 2 <= len(words) <= 15:
+        score += 25
+    else:
+        flags.append("word_count")
+
+    # Illegal characters / cleanliness
+    illegal = bool(re.search(r'[\\/:*?"<>|]', title))
+    if not illegal:
+        score += 25
+    else:
+        flags.append("illegal_chars")
+
+    # Metadata remnants (year/ISBN)
+    if YEAR_RE.search(title) or ISBN_RE.search(title):
+        flags.append("metadata")
+    else:
+        score += 25
+
+    # Acronym consistency
+    bad_acronym = False
+    for upper, canonical in acronym_map.items():
+        if re.search(rf"\b{re.escape(upper)}\b", title, flags=re.IGNORECASE):
+            if canonical not in title:
+                bad_acronym = True
+                break
+    if not bad_acronym:
+        score += 25
+    else:
+        flags.append("acronym_case")
+
+    return score, flags

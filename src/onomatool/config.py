@@ -42,6 +42,7 @@ DEFAULT_CONFIG = {
     "batch_rules": [],
     "duplicates_dir": "duplicates",
     "fuzzy_duplicate_threshold": 0.9,
+    "rename_folders": False,
 }
 
 

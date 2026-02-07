@@ -6,6 +6,7 @@ import json
 import difflib
 import os
 import shutil
+import shlex
 import sys
 import tempfile
 from datetime import datetime
@@ -18,6 +19,7 @@ from onomatool.conflict_resolver import resolve_conflict
 from onomatool.file_collector import collect_files
 from onomatool.file_dispatcher import FileDispatcher
 from onomatool.llm_integration import get_suggestions, list_ollama_models
+from onomatool.utils.titlecase_utils import apply_titlecase, evaluate_title
 from onomatool.utils.image_utils import convert_svg_to_png
 
 # Add project root to sys.path
@@ -86,6 +88,8 @@ def _write_report(entries: list[dict], path: str, report_format: str) -> None:
             "suggestion",
             "provider",
             "model",
+            "score",
+            "flags",
             "error",
         ]
         with open(path, "w", newline="") as f:
@@ -110,7 +114,8 @@ def _write_report(entries: list[dict], path: str, report_format: str) -> None:
                 f"<tr><td>{e.get('timestamp','')}</td><td>{e.get('status','')}</td>"
                 f"<td>{e.get('original_path','')}</td><td>{e.get('final_path','')}</td>"
                 f"<td>{e.get('suggestion','')}</td><td>{e.get('provider','')}</td>"
-                f"<td>{e.get('model','')}</td><td>{e.get('error','')}</td>"
+                f"<td>{e.get('model','')}</td><td>{e.get('score','')}</td>"
+                f"<td>{e.get('flags','')}</td><td>{e.get('error','')}</td>"
                 f"<td>{diff}</td></tr>"
             )
         html = (
@@ -120,7 +125,8 @@ def _write_report(entries: list[dict], path: str, report_format: str) -> None:
             "del{background:#f7c3c3}</style></head><body>"
             "<h2>Onoma Report</h2><table><tr>"
             "<th>Timestamp</th><th>Status</th><th>Original</th><th>Final</th>"
-            "<th>Suggestion</th><th>Provider</th><th>Model</th><th>Error</th><th>Diff</th>"
+            "<th>Suggestion</th><th>Provider</th><th>Model</th><th>Score</th><th>Flags</th>"
+            "<th>Error</th><th>Diff</th>"
             "</tr>"
             + "".join(rows)
             + "</table></body></html>"
@@ -131,6 +137,25 @@ def _write_report(entries: list[dict], path: str, report_format: str) -> None:
         with open(path, "w") as f:
             for entry in entries:
                 f.write(json.dumps(entry) + "\n")
+
+    if report_format in {"jsonl", "csv", "html"}:
+        # also write undo script
+        _write_undo_script(entries, path + ".undo.sh")
+
+
+def _write_undo_script(entries: list[dict], path: str) -> None:
+    lines = ["#!/bin/bash", "set -euo pipefail"]
+    for e in entries:
+        if e.get("status") not in {"renamed", "duplicate"}:
+            continue
+        src = e.get("final_path") or ""
+        dst = e.get("original_path") or ""
+        if not src or not dst:
+            continue
+        lines.append(f"mv {shlex.quote(src)} {shlex.quote(dst)}")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(path, 0o755)
 
 
 def _load_report_entries(path: str) -> list[dict]:
@@ -318,6 +343,35 @@ def _build_rename_plan(items: list[dict], config: dict) -> list[dict]:
             )
 
     return plan
+
+
+def _rename_folders(file_paths: list[str], config: dict, add_report_entry) -> None:
+    if not file_paths:
+        return
+    # Build unique directories, deepest first
+    dirs = {os.path.dirname(p) for p in file_paths}
+    # remove empty
+    dirs = {d for d in dirs if d}
+    for directory in sorted(dirs, key=lambda d: d.count(os.sep), reverse=True):
+        if not os.path.isdir(directory):
+            continue
+        parent = os.path.dirname(directory) or "."
+        base = os.path.basename(directory)
+        new_base = apply_titlecase(base, config=config, original_ext=None)
+        if new_base == base:
+            add_report_entry("folder_skipped", directory, directory)
+            continue
+        existing = os.listdir(parent)
+        final_name = resolve_conflict(new_base, existing)
+        target = os.path.join(parent, final_name)
+        if os.path.abspath(directory) == os.path.abspath(target):
+            add_report_entry("folder_skipped", directory, target)
+            continue
+        try:
+            shutil.move(directory, target)
+            add_report_entry("folder_renamed", directory, target)
+        except Exception as err:
+            add_report_entry("folder_error", directory, target, error=str(err))
 
 def _undo_from_report(report_path: str) -> list[dict]:
     entries = _load_report_entries(report_path)
@@ -514,6 +568,11 @@ def main(args=None):
         parser.add_argument(
             "--undo-report",
             help="Undo using a specific report file",
+        )
+        parser.add_argument(
+            "--rename-folders",
+            action="store_true",
+            help="Rename folders (bottom-up) using title casing",
         )
         args = parser.parse_args(args)
 
@@ -719,6 +778,8 @@ def main(args=None):
             provider: str = "",
             model_name: str = "",
         ) -> None:
+            title_for_score = os.path.basename(final_path) if final_path else suggestion
+            score, flags = evaluate_title(title_for_score, config) if title_for_score else (0.0, [])
             report_entries.append(
                 {
                     "timestamp": datetime.now().isoformat(),
@@ -728,6 +789,8 @@ def main(args=None):
                     "suggestion": suggestion,
                     "provider": provider,
                     "model": model_name,
+                    "score": score,
+                    "flags": ",".join(flags),
                     "error": error,
                 }
             )
@@ -1142,6 +1205,9 @@ def main(args=None):
                         provider=entry.get("provider", ""),
                         model_name=entry.get("model", ""),
                     )
+
+        if args.rename_folders or config.get("rename_folders", False):
+            _rename_folders(files, config, add_report_entry)
 
         report_enabled = config.get("report_enabled", True) and not args.no_report
         if report_enabled and report_entries:
